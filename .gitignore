@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 *.db
 data/screenshots/
+logs/*.log
 .env
 *.egg-info/
 dist/

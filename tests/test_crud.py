@@ -48,6 +48,74 @@ def test_upsert_updates_existing(db_session):
     assert db_session.query(AttendanceRecord).first().punch_time == "18:00"
 
 
+def test_upsert_ignores_invalid_punch_record(db_session):
+    data = _make_record(
+        punch_type="上班打卡",
+        punch_time="08:09",
+        punch_result="08:09 打卡·无效",
+        punch_status="无效",
+        notes="已经打过卡了，上班时间以最早打卡时间为准",
+    )
+
+    result = upsert_record(db_session, data)
+
+    assert result["action"] == "ignored"
+    assert result["record"] is None
+    assert db_session.query(AttendanceRecord).count() == 0
+
+
+def test_upsert_clock_in_keeps_earliest_valid_time(db_session):
+    upsert_record(db_session, _make_record(
+        punch_type="上班打卡",
+        punch_time="07:53",
+        punch_result="07:53 上班打卡·成功",
+        shift_time="06月18日 08:30上班",
+    ))
+
+    later = upsert_record(db_session, _make_record(
+        punch_type="上班打卡",
+        punch_time="08:09",
+        punch_result="08:09 上班打卡·成功",
+        shift_time="06月18日 08:30上班",
+    ))
+    assert later["action"] == "skipped"
+    assert db_session.query(AttendanceRecord).first().punch_time == "07:53"
+
+    earlier = upsert_record(db_session, _make_record(
+        punch_type="上班打卡",
+        punch_time="07:45",
+        punch_result="07:45 上班打卡·成功",
+        shift_time="06月18日 08:30上班",
+    ))
+    assert earlier["action"] == "updated"
+    assert db_session.query(AttendanceRecord).first().punch_time == "07:45"
+
+
+def test_upsert_clock_out_keeps_latest_valid_time(db_session):
+    upsert_record(db_session, _make_record(
+        punch_type="下班打卡",
+        punch_time="18:38",
+        punch_result="18:38 下班打卡·成功",
+    ))
+
+    later = upsert_record(db_session, _make_record(
+        punch_type="下班打卡",
+        punch_time="19:20",
+        punch_result="19:20 下班打卡·成功",
+        notes="下班打卡时间已更新到19:20",
+    ))
+    assert later["action"] == "updated"
+    assert db_session.query(AttendanceRecord).first().punch_time == "19:20"
+
+    earlier = upsert_record(db_session, _make_record(
+        punch_type="下班打卡",
+        punch_time="18:00",
+        punch_result="18:00 下班打卡·成功",
+    ))
+    assert earlier["action"] == "skipped"
+    assert db_session.query(AttendanceRecord).first().punch_time == "19:20"
+
+
 def test_query_records_by_date_range(db_session):
     for date in ["2026-06-16", "2026-06-17", "2026-06-18"]:
         upsert_record(db_session, _make_record(record_date=date, punch_type="上班打卡"))

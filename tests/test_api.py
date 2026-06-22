@@ -1,5 +1,6 @@
 # tests/test_api.py
 import sys
+from datetime import datetime
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -74,3 +75,50 @@ def test_daily_summary_empty(client):
     assert response.status_code == 200
     data = response.json()
     assert data["summary"] == []
+
+
+def test_extract_accepts_max_pages(client, monkeypatch):
+    import main as main_module
+
+    captured = {}
+
+    class FakeOrchestrator:
+        def __init__(self, config, db_session_factory):
+            pass
+
+        async def run_extraction(self, max_pages=None):
+            captured["max_pages"] = max_pages
+            return {
+                "status": "ok",
+                "pages_scanned": max_pages,
+                "records_found": 0,
+                "records": [],
+            }
+
+    monkeypatch.setattr(main_module, "ExtractOrchestrator", FakeOrchestrator)
+
+    response = client.post("/api/extract", json={"date_range": "all", "max_pages": 2})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert response.json()["pages_scanned"] == 2
+    assert captured["max_pages"] == 2
+
+
+def test_extract_rejects_invalid_max_pages(client):
+    response = client.post("/api/extract", json={"date_range": "all", "max_pages": 0})
+
+    assert response.status_code == 422
+
+
+def test_seconds_until_next_run(client):
+    import main as main_module
+
+    assert main_module.seconds_until_next_run(
+        "21:30",
+        now=datetime(2026, 6, 22, 21, 0),
+    ) == 30 * 60
+    assert main_module.seconds_until_next_run(
+        "21：30",
+        now=datetime(2026, 6, 22, 22, 0),
+    ) == 23.5 * 60 * 60

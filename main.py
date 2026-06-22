@@ -1,10 +1,11 @@
 # main.py
 import logging
-from contextlib import contextmanager
-from datetime import datetime
+import asyncio
+from contextlib import asynccontextmanager, contextmanager
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 
@@ -23,9 +24,22 @@ engine = create_engine(f"sqlite:///{config.database.path}", echo=False)
 Base.metadata.create_all(engine)
 SessionLocal = sessionmaker(bind=engine)
 
-app = FastAPI(title="钉钉考勤提取服务", version="1.0.0")
-
 last_extract_time: str | None = None
+last_scheduled_extract_time: str | None = None
+extract_lock = asyncio.Lock()
+scheduled_extract_task: asyncio.Task | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await start_scheduler()
+    try:
+        yield
+    finally:
+        await stop_scheduler()
+
+
+app = FastAPI(title="钉钉考勤提取服务", version="1.0.0", lifespan=lifespan)
 
 
 @contextmanager
@@ -41,6 +55,7 @@ def get_db():
 
 class ExtractRequest(BaseModel):
     date_range: str = "all"
+    max_pages: int | None = Field(default=None, ge=1)
 
 
 class RecordResponse(BaseModel):
@@ -69,21 +84,111 @@ def get_status():
         "status": "running",
         "dingtalk_running": is_dingtalk_running(),
         "last_extract_time": last_extract_time,
+        "scheduler": {
+            "enabled": config.scheduler.enabled,
+            "extract_time": config.scheduler.extract_time,
+            "max_pages": config.scheduler.max_pages,
+            "last_scheduled_extract_time": last_scheduled_extract_time,
+        },
         "total_records": total,
     }
 
 
 @app.post("/api/extract")
 async def extract_attendance(req: ExtractRequest):
-    global last_extract_time
-    orchestrator = ExtractOrchestrator(config, SessionLocal)
+    return await run_extract_job(max_pages=req.max_pages, source="manual")
+
+
+async def run_extract_job(
+    max_pages: int | None = None,
+    source: str = "manual",
+    skip_if_running: bool = False,
+) -> dict:
+    global last_extract_time, last_scheduled_extract_time
+
+    if extract_lock.locked():
+        message = "已有提取任务正在执行"
+        if skip_if_running:
+            logger.warning(f"{source} 提取任务跳过: {message}")
+        return {"status": "busy", "message": message}
+
+    await extract_lock.acquire()
     try:
-        result = await orchestrator.run_extraction()
-        last_extract_time = datetime.now().isoformat()
+        orchestrator = ExtractOrchestrator(config, SessionLocal)
+        result = await orchestrator.run_extraction(max_pages=max_pages)
+        now = datetime.now().isoformat()
+        last_extract_time = now
+        if source == "scheduled":
+            last_scheduled_extract_time = now
         return result
     except Exception as e:
         logger.exception("提取过程异常")
         return {"status": "error", "message": str(e)}
+    finally:
+        extract_lock.release()
+
+
+def seconds_until_next_run(schedule_time: str, now: datetime | None = None) -> float:
+    hour, minute = parse_schedule_time(schedule_time)
+    current = now or datetime.now()
+    target = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= current:
+        target += timedelta(days=1)
+    return (target - current).total_seconds()
+
+
+def parse_schedule_time(schedule_time: str) -> tuple[int, int]:
+    parts = schedule_time.replace("：", ":").split(":")
+    if len(parts) != 2:
+        raise ValueError(f"定时时间格式无效: {schedule_time}")
+
+    hour = int(parts[0])
+    minute = int(parts[1])
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise ValueError(f"定时时间超出范围: {schedule_time}")
+    return hour, minute
+
+
+async def scheduled_extract_loop():
+    while True:
+        try:
+            delay = seconds_until_next_run(config.scheduler.extract_time)
+        except ValueError as e:
+            logger.error(f"定时提取配置无效，任务已停止: {e}")
+            return
+
+        logger.info(
+            f"定时提取已启用: 每天 {config.scheduler.extract_time} "
+            f"自动提取 {config.scheduler.max_pages} 页"
+        )
+        await asyncio.sleep(delay)
+        logger.info("开始执行定时考勤提取")
+        result = await run_extract_job(
+            max_pages=config.scheduler.max_pages,
+            source="scheduled",
+            skip_if_running=True,
+        )
+        logger.info(f"定时考勤提取完成: {result.get('status')}")
+
+
+async def start_scheduler():
+    global scheduled_extract_task
+    if config.scheduler.enabled:
+        scheduled_extract_task = asyncio.create_task(scheduled_extract_loop())
+
+
+async def stop_scheduler():
+    global scheduled_extract_task
+    if scheduled_extract_task is None:
+        return
+
+    scheduled_extract_task.cancel()
+    try:
+        await scheduled_extract_task
+    except asyncio.CancelledError:
+        pass
+    finally:
+        scheduled_extract_task = None
 
 
 @app.get("/api/records")
