@@ -8,3 +8,5 @@ logs/*.log
 dist/
 build/
 .pytest_cache/
+config.yaml
+.venv/

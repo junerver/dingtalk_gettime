@@ -1,0 +1,52 @@
+dingtalk:
+  path: "D:\\Program Files (x86)\\DingDing\\main\\current\\DingTalk.exe"
+  launch_wait: 10
+
+automation:
+  click_delay: 1.0
+  scroll_delay: 2.0
+  scroll_amount: 1
+  scrolls_per_page: 5
+  scroll_focus_x_ratio: 0.94
+  scroll_focus_y_ratio: 0.55
+  conversation_list_scrolls: 8
+  conversation_list_scroll_amount: 1
+  conversation_list_x_ratio: 0.27
+  conversation_list_y_ratio: 0.55
+  work_notification_x_ratio: 0.27
+  work_notification_y_ratio: 0.145
+  fallback_conversation_x_ratio: 0.27
+  fallback_conversation_y_ratio: 0.22
+  bottom_reset_scrolls: 12
+  bottom_reset_scroll_amount: 3
+  max_pages: 20
+  duplicate_page_stop_threshold: 5
+  retry_count: 1
+
+vision:
+  api_base: "http://your-api-host:port/v1"
+  api_key: "your-api-key-here"
+  model: "mimo-v2.5"
+  max_tokens: 4000
+  parse_retry_count: 2
+  empty_result_retry_count: 1
+
+database:
+  path: "./data/attendance.db"
+
+server:
+  host: "0.0.0.0"
+  port: 8345
+
+scheduler:
+  enabled: true
+  extract_time: "08:30"
+  max_pages: 2
+
+screenshots:
+  save_dir: "./data/screenshots"
+  keep_days: 30
+  content_crop_left_ratio: 0.385
+  content_crop_top_ratio: 0.05
+  content_crop_right_ratio: 1.0
+  content_crop_bottom_ratio: 1.0
