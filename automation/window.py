@@ -17,6 +17,7 @@ SW_HIDE = 0
 SW_SHOWNORMAL = 1
 SW_SHOW = 5
 SW_RESTORE = 9
+SW_MINIMIZE = 6
 HWND_TOP = 0
 HWND_TOPMOST = -1
 HWND_NOTOPMOST = -2
@@ -379,6 +380,21 @@ def _resolve_dingtalk_executable(exe_path: str) -> str | None:
         if path.exists():
             return str(path)
     return None
+
+
+
+def minimize_window(window) -> bool:
+    """最小化窗口。"""
+    hwnd = _read_attr(window, 'hwnd')
+    if not hwnd:
+        hwnd = _call_method(window, 'getHandle')
+    if not hwnd:
+        return False
+    if user32 is None:
+        return False
+    user32.ShowWindow(hwnd, SW_MINIMIZE)
+    time.sleep(0.2)
+    return True
 
 
 def launch_dingtalk(exe_path: str, wait_seconds: int = 10) -> bool:

@@ -4,8 +4,11 @@ import asyncio
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from pydantic import BaseModel, Field
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+import time as _time
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 
@@ -29,6 +32,9 @@ last_scheduled_extract_time: str | None = None
 extract_lock = asyncio.Lock()
 scheduled_extract_task: asyncio.Task | None = None
 
+request_log: list[dict] = []
+request_log_maxlen = 200
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -40,6 +46,52 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="钉钉考勤提取服务", version="1.0.0", lifespan=lifespan)
+
+templates = Jinja2Templates(directory='templates')
+
+
+@app.middleware('http')
+async def log_requests(request: Request, call_next):
+    start = _time.time()
+    response = await call_next(request)
+    duration_ms = round((_time.time() - start) * 1000, 1)
+    entry = {
+        'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'method': request.method,
+        'path': str(request.url.path),
+        'status': response.status_code,
+        'duration': duration_ms,
+        'client': request.client.host if request.client else None,
+    }
+    request_log.append(entry)
+    if len(request_log) > request_log_maxlen:
+        request_log.pop(0)
+    return response
+
+
+
+
+@app.get('/', response_class=HTMLResponse)
+async def dashboard(request: Request):
+    with get_db() as db:
+        records = query_records(db)
+        total = db.query(AttendanceRecord).count()
+    context = {
+        'request': request,
+        'now': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'port': config.server.port,
+        'dingtalk_running': is_dingtalk_running(),
+        'dingtalk_path': config.dingtalk.path,
+        'total_records': total,
+        'records': [r.to_dict() for r in records[:100]],
+        'scheduler_enabled': config.scheduler.enabled,
+        'extract_time': config.scheduler.extract_time,
+        'last_extract': last_extract_time,
+        'last_scheduled': last_scheduled_extract_time,
+        'access_logs': request_log[-50:],
+        'total_requests': len(request_log),
+    }
+    return templates.TemplateResponse('dashboard.html', context)
 
 
 @contextmanager

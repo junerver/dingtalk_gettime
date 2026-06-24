@@ -1,11 +1,12 @@
 # extractor/orchestrator.py
+import asyncio
 import logging
 import time
 from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from automation.window import activate_dingtalk, is_dingtalk_running
+from automation.window import activate_dingtalk, is_dingtalk_running, minimize_window
 from automation.controller import (
     prepare_work_notification_view,
     scroll_up,
@@ -119,108 +120,124 @@ class ExtractOrchestrator:
         return min(configured_limit, max(0, requested_max_pages))
 
     async def run_extraction(self, max_pages: int | None = None) -> dict:
-        """执行完整的考勤数据提取流程。"""
-        # 1. 激活钉钉窗口
+        """Execute the full attendance extraction flow.
+
+        New flow: batch capture screenshots, minimize DingTalk window,
+        then analyze all screenshots in parallel to reduce window occupation.
+        """
+
+        # 1. Activate DingTalk window
         window = activate_dingtalk(
             self.config.dingtalk.path,
             self.config.dingtalk.launch_wait,
         )
         if window is None:
             if is_dingtalk_running():
-                return {"status": "error", "message": "钉钉正在运行，但无法找到或激活主窗口"}
-            return {"status": "error", "message": "钉钉未运行且启动失败"}
+                return {'status': 'error', 'message': 'DingTalk running but cannot find main window'}
+            return {'status': 'error', 'message': 'DingTalk not running and failed to start'}
 
         self._prepare_work_notification(window)
 
-        all_records = []
-        pages_scanned = 0
-        consecutive_duplicate_pages = 0
         page_limit = self._page_limit(max_pages)
-        logger.info(f"本次请求最多处理 {page_limit} 页截图")
+        logger.info(f'Max pages to capture this run: {page_limit}')
 
+        # ---- Phase 1: Batch capture screenshots ----
+        captured_pages = []
         for page in range(page_limit):
-            logger.info(f"扫描第 {page + 1} 页...")
+            logger.info(f'Capturing page {page + 1}...')
 
-            # 2. 截图
             screenshot = self._capture_content(window)
 
             if self.screenshot_mgr.is_mostly_blank(screenshot):
-                logger.warning("截图为空白，停止提取")
+                logger.warning('Screenshot is blank, stopping capture')
                 break
 
-            # 保存截图
             screenshot_path = self.screenshot_mgr.save(screenshot)
             base64_img = self.screenshot_mgr.to_base64(screenshot)
+            captured_pages.append({
+                'screenshot': screenshot,
+                'screenshot_path': screenshot_path,
+                'base64_img': base64_img,
+                'page_num': page + 1,
+            })
 
-            # 3. LLM提取
-            result = await self.vision.extract_from_image(base64_img)
-            records = result.get("records", [])
+            if page >= page_limit - 1:
+                logger.info('Reached max capture pages')
+                break
+
+            if not self._scroll_page(window, screenshot):
+                logger.info('Reached top or cannot scroll further, stopping capture')
+                break
+
+        # Capture done, minimize DingTalk window immediately
+        minimize_window(window)
+        logger.info(
+            f'Capture phase done, {len(captured_pages)} pages captured, DingTalk minimized'
+        )
+
+        if not captured_pages:
+            return {
+                'status': 'ok',
+                'pages_scanned': 0,
+                'records_found': 0,
+                'records': [],
+            }
+
+        # ---- Phase 2: Parallel AI analysis ----
+        async def _analyze_page(page_data: dict):
+            result = await self.vision.extract_from_image(page_data['base64_img'])
+            return result, page_data
+
+        analysis_tasks = [_analyze_page(p) for p in captured_pages]
+        analysis_results = await asyncio.gather(*analysis_tasks, return_exceptions=True)
+
+        # ---- Phase 3: Aggregate and store records ----
+        all_records = []
+        pages_scanned = 0
+
+        for idx, analysis_result in enumerate(analysis_results):
+            page_data = captured_pages[idx]
+            page_num = page_data['page_num']
+
+            if isinstance(analysis_result, Exception):
+                logger.error(f'Page {page_num} AI analysis failed: {analysis_result}')
+                continue
+
+            result, _ = analysis_result
+            records = result.get('records', [])
             pages_scanned += 1
+            logger.info(f'Page {page_num}: extracted {len(records)} records')
 
-            logger.info(f"本页提取到 {len(records)} 条记录")
-
-            # 4. 入库
             inserted_count = 0
             updated_count = 0
             skipped_count = 0
             ignored_count = 0
             for record_data in records:
-                record_data["raw_text"] = str(result)
-                record_data["screenshot_path"] = screenshot_path
+                record_data['raw_text'] = str(result)
+                record_data['screenshot_path'] = page_data['screenshot_path']
                 with self.db_session_factory() as db:
                     upsert_result = upsert_record(db, record_data)
-                    if upsert_result["action"] == "inserted":
+                    if upsert_result['action'] == 'inserted':
                         inserted_count += 1
-                    elif upsert_result["action"] == "updated":
+                    elif upsert_result['action'] == 'updated':
                         updated_count += 1
-                    elif upsert_result["action"] == "skipped":
+                    elif upsert_result['action'] == 'skipped':
                         skipped_count += 1
-                    elif upsert_result["action"] == "ignored":
+                    elif upsert_result['action'] == 'ignored':
                         ignored_count += 1
 
-                    if upsert_result["action"] in {"inserted", "updated"}:
-                        all_records.append(upsert_result["record"])
-
-            # 5. 判断是否继续
-            valid_record_count = len(records) - ignored_count
-            if valid_record_count > 0 and inserted_count == 0 and updated_count == 0:
-                consecutive_duplicate_pages += 1
-                logger.info(
-                    "本页记录均为数据库已有数据，连续重复页数: "
-                    f"{consecutive_duplicate_pages}/{self.config.automation.duplicate_page_stop_threshold}"
-                )
-            else:
-                consecutive_duplicate_pages = 0
+                    if upsert_result['action'] in {'inserted', 'updated'}:
+                        all_records.append(upsert_result['record'])
 
             if records:
                 logger.info(
-                    f"本页新增 {inserted_count} 条，更新已有 {updated_count} 条，"
-                    f"跳过已有 {skipped_count} 条，忽略无效 {ignored_count} 条"
+                    f'Page {page_num}: inserted {inserted_count}, updated {updated_count}, '
+                    f'skipped {skipped_count}, ignored {ignored_count}'
                 )
 
-            if (
-                self.config.automation.duplicate_page_stop_threshold > 0
-                and consecutive_duplicate_pages >= self.config.automation.duplicate_page_stop_threshold
-            ):
-                logger.info("连续重复页数达到阈值，停止提取")
-                break
-
-            if page >= page_limit - 1:
-                logger.info("已达到本次请求最大处理页数，停止提取")
-                break
-
-            model_says_no_more = result.get("page_reached_top") or not result.get("has_more")
-            if model_says_no_more:
-                logger.info("模型判断已到达顶部或无更多数据，将尝试滚动截图验证")
-
-            # 6. 向上滚动。是否到顶以滚动后的截图变化为准，避免模型误判导致提前停止。
-            if not self._scroll_page(window, screenshot):
-                logger.info("已到达顶部或无法继续滚动，停止提取")
-                break
-
         return {
-            "status": "ok",
-            "pages_scanned": pages_scanned,
-            "records_found": len(all_records),
-            "records": all_records,
+            'status': 'ok',
+            'pages_scanned': pages_scanned,
+            'records_found': len(all_records),
+            'records': all_records,
         }
