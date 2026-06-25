@@ -518,6 +518,72 @@ def _shell_activate_dingtalk(exe_path: str) -> bool:
         return False
 
 
+def _inject_input_for_foreground():
+    """注入一次用户输入信号，使当前进程获得 SetForegroundWindow 权限。"""
+    INPUT_MOUSE = 0
+    MOUSEEVENTF_MOVE = 0x0001
+
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [
+            ("dx", wintypes.LONG),
+            ("dy", wintypes.LONG),
+            ("mouseData", wintypes.DWORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        ]
+
+    class INPUT_UNION(ctypes.Union):
+        _fields_ = [("mi", MOUSEINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _fields_ = [
+            ("type", wintypes.DWORD),
+            ("union", INPUT_UNION),
+        ]
+
+    inp = INPUT()
+    inp.type = INPUT_MOUSE
+    inp.union.mi = MOUSEINPUT(0, 0, 0, MOUSEEVENTF_MOVE, 0, None)
+    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+
+
+def _force_foreground_window(hwnd: int) -> bool:
+    """强制将窗口拉到前台（注入输入 + AttachThreadInput + SetForegroundWindow）。"""
+    if user32 is None:
+        return False
+
+    _inject_input_for_foreground()
+
+    user32.ShowWindow(hwnd, SW_SHOWNORMAL)
+    user32.ShowWindow(hwnd, SW_RESTORE)
+    user32.AllowSetForegroundWindow(-1)
+
+    foreground_hwnd = user32.GetForegroundWindow()
+    current_thread = ctypes.windll.kernel32.GetCurrentThreadId()
+    foreground_thread = user32.GetWindowThreadProcessId(foreground_hwnd, None)
+    target_thread = user32.GetWindowThreadProcessId(hwnd, None)
+
+    attached = []
+    for thread_id in {foreground_thread, target_thread}:
+        if thread_id and thread_id != current_thread:
+            if user32.AttachThreadInput(current_thread, thread_id, True):
+                attached.append(thread_id)
+
+    try:
+        user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+        user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        user32.SetActiveWindow(hwnd)
+        user32.SetFocus(hwnd)
+    finally:
+        for thread_id in attached:
+            user32.AttachThreadInput(current_thread, thread_id, False)
+
+    return bool(user32.GetForegroundWindow() == hwnd)
+
+
 def activate_dingtalk(exe_path: str, launch_wait: int = 10) -> object:
     """确保钉钉运行并激活窗口，返回窗口对象。"""
     # 先检查进程是否已运行
@@ -562,17 +628,22 @@ def activate_dingtalk(exe_path: str, launch_wait: int = 10) -> object:
             f"class={cls_name} rect=({left},{top},{width},{height}) visible={visible}"
         )
 
-        # 确保窗口已渲染完成
+        # 确保窗口可见且渲染完成
         for _ in range(4):
             time.sleep(0.5)
             if hwnd and user32:
                 if user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd):
                     break
 
-        if _read_attr(window, "isActive", True) is False:
-            logger.warning(f"钉钉窗口未报告为前台: {window.title}")
-        else:
-            logger.info(f"钉钉窗口已激活: {window.title}")
+        # 强制拉到前台（注入用户输入信号绕过 Windows 前台锁）
+        if hwnd and user32:
+            fg = _force_foreground_window(hwnd)
+            time.sleep(0.5)
+            if fg:
+                logger.info(f"钉钉窗口已激活到前台: {window.title}")
+            else:
+                logger.warning(f"钉钉窗口未能拉到前台: {window.title}")
+
         return window
     except Exception as e:
         logger.error(f"激活窗口失败: {e}")
