@@ -64,6 +64,8 @@ class ExtractOrchestrator:
             content_x_ratio=self.config.automation.scroll_focus_x_ratio,
             content_y_ratio=self.config.automation.scroll_focus_y_ratio,
             delay=self.config.automation.click_delay,
+            scroll_step_delay=self.config.automation.scroll_step_delay,
+            click_settle_delay=self.config.automation.click_settle_delay,
         )
 
     def _scroll_page(self, window, current_screenshot) -> bool:
@@ -121,11 +123,13 @@ class ExtractOrchestrator:
             return configured_limit
         return min(configured_limit, max(0, requested_max_pages))
 
-    async def run_extraction(self, max_pages: int | None = None) -> dict:
+    async def run_extraction(self, max_pages: int | None = None, dry_run: bool = False) -> dict:
         """Execute the full attendance extraction flow.
 
         New flow: batch capture screenshots, minimize DingTalk window,
         then analyze all screenshots in parallel to reduce window occupation.
+
+        dry_run: 跳过 AI 分析，仅测试窗口激活和截图流程。
         """
 
         # 1. Activate DingTalk window
@@ -181,6 +185,15 @@ class ExtractOrchestrator:
             return {
                 'status': 'ok',
                 'pages_scanned': 0,
+                'records_found': 0,
+                'records': [],
+            }
+
+        if dry_run:
+            logger.info(f'dry_run: 跳过 AI 分析，已捕获 {len(captured_pages)} 页')
+            return {
+                'status': 'ok',
+                'pages_scanned': len(captured_pages),
                 'records_found': 0,
                 'records': [],
             }

@@ -108,6 +108,7 @@ def get_db():
 class ExtractRequest(BaseModel):
     date_range: str = "all"
     max_pages: int | None = Field(default=None, ge=1)
+    dry_run: bool = False
 
 
 class RecordResponse(BaseModel):
@@ -148,13 +149,14 @@ def get_status():
 
 @app.post("/api/extract")
 async def extract_attendance(req: ExtractRequest):
-    return await run_extract_job(max_pages=req.max_pages, source="manual")
+    return await run_extract_job(max_pages=req.max_pages, source="manual", dry_run=req.dry_run)
 
 
 async def run_extract_job(
     max_pages: int | None = None,
     source: str = "manual",
     skip_if_running: bool = False,
+    dry_run: bool = False,
 ) -> dict:
     global last_extract_time, last_scheduled_extract_time
 
@@ -167,7 +169,7 @@ async def run_extract_job(
     await extract_lock.acquire()
     try:
         orchestrator = ExtractOrchestrator(config, SessionLocal)
-        result = await orchestrator.run_extraction(max_pages=max_pages)
+        result = await orchestrator.run_extraction(max_pages=max_pages, dry_run=dry_run)
         now = datetime.now().isoformat()
         last_extract_time = now
         if source == "scheduled":

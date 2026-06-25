@@ -14,6 +14,8 @@ class DingTalkConfig:
 class AutomationConfig:
     click_delay: float = 1.0
     scroll_delay: float = 2.0
+    scroll_step_delay: float = 0.15
+    click_settle_delay: float = 1.0
     scroll_amount: int = 1
     scrolls_per_page: int = 5
     scroll_focus_x_ratio: float = 0.94

@@ -253,6 +253,8 @@ def prepare_work_notification_view(
     content_x_ratio: float = DEFAULT_SCROLL_FOCUS_X_RATIO,
     content_y_ratio: float = DEFAULT_SCROLL_FOCUS_Y_RATIO,
     delay: float = 0.2,
+    scroll_step_delay: float = 0.15,
+    click_settle_delay: float = 1.0,
 ):
     """进入置顶的工作通知会话，并将消息定位到底部。"""
     logger.info("准备工作通知会话：定位置顶会话，切换会话后回到底部")
@@ -265,7 +267,6 @@ def prepare_work_notification_view(
         delay=delay,
     )
 
-    scroll_step_delay = 0.15
     for _ in range(max(conversation_list_scrolls, 0)):
         pyautogui.scroll(conversation_list_scroll_amount * WHEEL_DELTA)
         time.sleep(scroll_step_delay)
@@ -279,7 +280,7 @@ def prepare_work_notification_view(
     )
 
     # 等待会话内容加载
-    time.sleep(1.0)
+    time.sleep(click_settle_delay)
 
     # 聚焦内容区域一次，后续滚动不再重复聚焦
     focus_window_for_scroll(
