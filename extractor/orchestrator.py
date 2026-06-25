@@ -7,11 +7,13 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from automation.window import activate_dingtalk, is_dingtalk_running, minimize_window
+import pyautogui
 from automation.controller import (
     prepare_work_notification_view,
-    scroll_up,
+    focus_window_for_scroll,
     scroll_window_wheel_message,
     wait,
+    WHEEL_DELTA,
 )
 from capture.screenshot import ScreenshotManager
 from database.crud import upsert_record
@@ -66,21 +68,21 @@ class ExtractOrchestrator:
 
     def _scroll_page(self, window, current_screenshot) -> bool:
         """滚动到更早消息，并验证截图是否发生变化。"""
-        per_scroll_delay = (
-            self.config.automation.scroll_delay
-            / self.config.automation.scrolls_per_page
+        # 聚焦窗口一次，后续滚动不再重复聚焦
+        focus_window_for_scroll(
+            window,
+            x_ratio=self.config.automation.scroll_focus_x_ratio,
+            y_ratio=self.config.automation.scroll_focus_y_ratio,
+            click=False,
         )
 
+        # 直接滚动，无需每次重新聚焦窗口
+        scroll_step_delay = 0.05
         for _ in range(self.config.automation.scrolls_per_page):
-            scroll_up(
-                amount=self.config.automation.scroll_amount,
-                delay=per_scroll_delay,
-                window=window,
-                x_ratio=self.config.automation.scroll_focus_x_ratio,
-                y_ratio=self.config.automation.scroll_focus_y_ratio,
-            )
+            pyautogui.scroll(self.config.automation.scroll_amount * WHEEL_DELTA)
+            time.sleep(scroll_step_delay)
 
-        wait(self.config.automation.scroll_delay)
+        wait(0.5)
         after_scroll = self._capture_content(window)
         changed_ratio = self.screenshot_mgr.changed_pixel_ratio(
             current_screenshot,
@@ -95,12 +97,12 @@ class ExtractOrchestrator:
             scroll_window_wheel_message(
                 window,
                 amount=self.config.automation.scroll_amount,
-                delay=per_scroll_delay,
+                delay=scroll_step_delay,
                 x_ratio=self.config.automation.scroll_focus_x_ratio,
                 y_ratio=self.config.automation.scroll_focus_y_ratio,
             )
 
-        wait(self.config.automation.scroll_delay)
+        wait(0.5)
         after_message_scroll = self._capture_content(window)
         changed_ratio = self.screenshot_mgr.changed_pixel_ratio(
             current_screenshot,

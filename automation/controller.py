@@ -6,7 +6,7 @@ import pyautogui
 
 logger = logging.getLogger(__name__)
 
-pyautogui.PAUSE = 0.1
+pyautogui.PAUSE = 0.03
 pyautogui.FAILSAFE = True
 
 WM_MOUSEWHEEL = 0x020A
@@ -257,37 +257,38 @@ def prepare_work_notification_view(
     """进入置顶的工作通知会话，并将消息定位到底部。"""
     logger.info("准备工作通知会话：定位置顶会话，切换会话后回到底部")
 
-    for _ in range(max(conversation_list_scrolls, 0)):
-        scroll_up(
-            amount=conversation_list_scroll_amount,
-            delay=delay,
-            window=window,
-            x_ratio=conversation_list_x_ratio,
-            y_ratio=conversation_list_y_ratio,
-        )
-
-    click_window_ratio(
+    # 聚焦会话列表区域一次，后续滚动不再重复聚焦
+    focus_window_for_scroll(
         window,
-        x_ratio=second_conversation_x_ratio,
-        y_ratio=second_conversation_y_ratio,
-        delay=max(delay, 0.6),
+        x_ratio=conversation_list_x_ratio,
+        y_ratio=conversation_list_y_ratio,
+        click=False,
     )
 
+    scroll_step_delay = 0.05
+    for _ in range(max(conversation_list_scrolls, 0)):
+        pyautogui.scroll(conversation_list_scroll_amount * WHEEL_DELTA)
+        time.sleep(scroll_step_delay)
+
+    # 直接点击第一个会话（工作通知），省略点击第二个会话
     click_window_ratio(
         window,
         x_ratio=first_conversation_x_ratio,
         y_ratio=first_conversation_y_ratio,
-        delay=max(delay, 0.5),
+        delay=0.3,
+    )
+
+    # 聚焦内容区域一次，后续滚动不再重复聚焦
+    focus_window_for_scroll(
+        window,
+        x_ratio=content_x_ratio,
+        y_ratio=content_y_ratio,
+        click=False,
     )
 
     for _ in range(max(bottom_reset_scrolls, 0)):
-        scroll_down(
-            amount=bottom_reset_scroll_amount,
-            delay=delay,
-            window=window,
-            x_ratio=content_x_ratio,
-            y_ratio=content_y_ratio,
-        )
+        pyautogui.scroll(-bottom_reset_scroll_amount * WHEEL_DELTA)
+        time.sleep(scroll_step_delay)
 
 
 def press_key(key: str, delay: float = 0.5):
