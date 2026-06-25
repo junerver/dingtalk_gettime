@@ -9,15 +9,19 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+CREATE_NO_WINDOW = 0x08000000
 DINGTALK_PROCESS_NAMES = {"dingtalk.exe"}
 DINGTALK_TITLE_KEYWORDS = ("钉钉", "DingTalk")
-MIN_MAIN_WINDOW_AREA = 300 * 200
+MIN_MAIN_WINDOW_AREA = 600 * 400
 
 SW_HIDE = 0
 SW_SHOWNORMAL = 1
 SW_SHOW = 5
 SW_RESTORE = 9
 SW_MINIMIZE = 6
+GWL_EXSTYLE = -20
+GW_OWNER = 4
+WS_EX_TOOLWINDOW = 0x00000080
 HWND_TOP = 0
 HWND_TOPMOST = -1
 HWND_NOTOPMOST = -2
@@ -188,6 +192,19 @@ class Win32Window:
         return self.isActive
 
 
+def _is_top_level_main_window(hwnd: int) -> bool:
+    """检查窗口是否为真正的顶层主窗口（排除有 Owner 的子窗口和工具窗口）。"""
+    if user32 is None:
+        return True
+    # 有 Owner 的窗口是弹出窗口 / 子窗口，不是主窗口
+    if user32.GetWindow(hwnd, GW_OWNER):
+        return False
+    ex_style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    if ex_style & WS_EX_TOOLWINDOW:
+        return False
+    return True
+
+
 def _read_attr(obj, name: str, default=None):
     try:
         value = getattr(obj, name)
@@ -236,7 +253,7 @@ def _window_score(window) -> int:
     if active:
         score += 2_000_000
     if area < MIN_MAIN_WINDOW_AREA:
-        score -= 5_000_000
+        return -1
     if left < -10_000 or top < -10_000:
         score -= 1_000_000
     return score
@@ -258,6 +275,7 @@ def _get_dingtalk_process_ids() -> set[int]:
             capture_output=True,
             text=True,
             timeout=5,
+            creationflags=CREATE_NO_WINDOW,
         )
     except Exception as e:
         logger.debug(f"读取进程列表失败: {e}")
@@ -303,16 +321,19 @@ def _find_windows_by_process_ids(process_ids: set[int]):
         if pid.value not in process_ids:
             return True
 
+        if not _is_top_level_main_window(hwnd):
+            return True
+
         window = Win32Window(hwnd)
         title = window.title
         left, top, width, height = _window_geometry(window)
         area = width * height
-        if area <= 0:
+        if area < MIN_MAIN_WINDOW_AREA:
             return True
 
         if any(keyword.lower() in title.lower() for keyword in DINGTALK_TITLE_KEYWORDS):
             windows.append(window)
-        elif area >= MIN_MAIN_WINDOW_AREA and window.visible:
+        elif window.visible:
             windows.append(window)
         return True
 
@@ -320,10 +341,25 @@ def _find_windows_by_process_ids(process_ids: set[int]):
     return windows
 
 
-def find_dingtalk_window():
+def _get_hwnd(window) -> int | None:
+    """从窗口对象中获取原生句柄（兼容 pywinctl 和 Win32Window）。"""
+    hwnd = _read_attr(window, "hwnd")
+    if hwnd:
+        return hwnd
+    return _call_method(window, "getHandle")
+
+
+def find_dingtalk_window(process_ids: set[int] | None = None):
     """查找钉钉窗口句柄。返回窗口对象或None。"""
-    process_ids = _get_dingtalk_process_ids()
+    if process_ids is None:
+        process_ids = _get_dingtalk_process_ids()
     windows = _find_windows_by_title()
+    # 过滤 pywinctl 返回的非主窗口（有 Owner 或工具窗口样式）
+    if user32 is not None:
+        windows = [
+            w for w in windows
+            if not (hwnd := _get_hwnd(w)) or _is_top_level_main_window(hwnd)
+        ]
     windows.extend(_find_windows_by_process_ids(process_ids))
 
     window = _select_best_window(windows)
@@ -354,6 +390,7 @@ def _get_running_dingtalk_path() -> str | None:
             capture_output=True,
             text=True,
             timeout=5,
+            creationflags=CREATE_NO_WINDOW,
         )
     except Exception as e:
         logger.debug(f"读取钉钉进程路径失败: {e}")
@@ -399,12 +436,14 @@ def minimize_window(window) -> bool:
 
 def launch_dingtalk(exe_path: str, wait_seconds: int = 10) -> bool:
     """启动钉钉客户端。"""
-    resolved_path = _resolve_dingtalk_executable(exe_path)
-    if resolved_path is None:
+    if not exe_path or not Path(exe_path).exists():
         logger.error(f"钉钉路径不存在: {exe_path}")
         return False
     try:
-        subprocess.Popen([resolved_path])
+        subprocess.Popen(
+            [exe_path],
+            creationflags=CREATE_NO_WINDOW,
+        )
         logger.info(f"正在启动钉钉，等待 {wait_seconds} 秒...")
         time.sleep(wait_seconds)
         return True
@@ -415,11 +454,22 @@ def launch_dingtalk(exe_path: str, wait_seconds: int = 10) -> bool:
 
 def activate_dingtalk(exe_path: str, launch_wait: int = 10) -> object:
     """确保钉钉运行并激活窗口，返回窗口对象。"""
-    window = find_dingtalk_window()
-    if window is None:
-        if not launch_dingtalk(exe_path, launch_wait if not is_dingtalk_running() else 2):
+    # 先检查进程是否已运行，只查一次 tasklist
+    process_ids = _get_dingtalk_process_ids()
+    dingtalk_running = bool(process_ids)
+
+    if not dingtalk_running:
+        # 钉钉未运行，需要启动
+        if not launch_dingtalk(exe_path, launch_wait):
             return None
-        window = find_dingtalk_window()
+        process_ids = _get_dingtalk_process_ids()
+
+    window = find_dingtalk_window(process_ids)
+
+    # 窗口未找到但进程已运行，可能是窗口被过滤，重试一次
+    if window is None and dingtalk_running:
+        time.sleep(0.5)
+        window = find_dingtalk_window(process_ids)
 
     if window is None:
         logger.error("无法找到钉钉窗口")
@@ -434,7 +484,7 @@ def activate_dingtalk(exe_path: str, launch_wait: int = 10) -> object:
 
         _call_method(window, "raiseWindow")
         activated = _call_method(window, "activate", wait=True)
-        time.sleep(0.5)
+        time.sleep(0.2)
 
         if activated is False or _read_attr(window, "isActive", True) is False:
             logger.warning(f"已尝试置前钉钉窗口，但系统未报告为前台: {window.title}")

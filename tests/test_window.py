@@ -91,7 +91,7 @@ def test_activate_dingtalk_reopens_running_app_when_window_missing(monkeypatch):
     monkeypatch.setattr(
         window_module,
         "find_dingtalk_window",
-        lambda: next(find_results),
+        lambda _process_ids=None: next(find_results),
     )
     monkeypatch.setattr(window_module, "is_dingtalk_running", lambda: True)
     monkeypatch.setattr(
