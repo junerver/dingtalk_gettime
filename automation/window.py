@@ -527,7 +527,7 @@ def activate_dingtalk(exe_path: str, launch_wait: int = 10) -> object:
     if dingtalk_running:
         # 已运行：用 ShellExecute 激活现有实例（和用户双击 exe / 点击任务栏效果一致）
         _shell_activate_dingtalk(exe_path)
-        time.sleep(1.5)
+        time.sleep(3.0)
     else:
         # 未运行：启动并等待
         if not launch_dingtalk(exe_path, launch_wait):

@@ -265,7 +265,7 @@ def prepare_work_notification_view(
         click=False,
     )
 
-    scroll_step_delay = 0.05
+    scroll_step_delay = 0.15
     for _ in range(max(conversation_list_scrolls, 0)):
         pyautogui.scroll(conversation_list_scroll_amount * WHEEL_DELTA)
         time.sleep(scroll_step_delay)
@@ -275,8 +275,11 @@ def prepare_work_notification_view(
         window,
         x_ratio=first_conversation_x_ratio,
         y_ratio=first_conversation_y_ratio,
-        delay=0.3,
+        delay=delay,
     )
+
+    # 等待会话内容加载
+    time.sleep(1.0)
 
     # 聚焦内容区域一次，后续滚动不再重复聚焦
     focus_window_for_scroll(

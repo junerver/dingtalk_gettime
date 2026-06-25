@@ -63,7 +63,7 @@ class ExtractOrchestrator:
             bottom_reset_scroll_amount=self.config.automation.bottom_reset_scroll_amount,
             content_x_ratio=self.config.automation.scroll_focus_x_ratio,
             content_y_ratio=self.config.automation.scroll_focus_y_ratio,
-            delay=min(self.config.automation.click_delay, 0.2),
+            delay=self.config.automation.click_delay,
         )
 
     def _scroll_page(self, window, current_screenshot) -> bool:
