@@ -584,30 +584,45 @@ def _force_foreground_window(hwnd: int) -> bool:
     return bool(user32.GetForegroundWindow() == hwnd)
 
 
+def _log_foreground_window(label: str):
+    """诊断：记录当前前台窗口信息。"""
+    if user32 is None:
+        return
+    fg_hwnd = user32.GetForegroundWindow()
+    if not fg_hwnd:
+        logger.info(f"[{label}] 无前台窗口")
+        return
+    title = _get_hwnd_title(fg_hwnd)
+    cls = _get_class_name(fg_hwnd)
+    rect = wintypes.RECT()
+    user32.GetWindowRect(fg_hwnd, ctypes.byref(rect))
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(fg_hwnd, ctypes.byref(pid))
+    logger.info(
+        f"[{label}] 前台: hwnd={fg_hwnd:#x} title={title!r} "
+        f"class={cls} rect=({rect.left},{rect.top},{rect.right-rect.left},{rect.bottom-rect.top}) pid={pid.value}"
+    )
+
+
 def activate_dingtalk(exe_path: str, launch_wait: int = 10) -> object:
     """确保钉钉运行并激活窗口，返回窗口对象。"""
     # 先检查进程是否已运行
     process_ids = _get_dingtalk_process_ids()
-    dingtalk_running = bool(process_ids)
 
-    if dingtalk_running:
-        # 已运行：用 ShellExecute 激活现有实例（和用户双击 exe / 点击任务栏效果一致）
-        _shell_activate_dingtalk(exe_path)
-        time.sleep(3.0)
-    else:
+    if not process_ids:
         # 未运行：启动并等待
         if not launch_dingtalk(exe_path, launch_wait):
             return None
         process_ids = _get_dingtalk_process_ids()
 
+    # 直接查找窗口（不做 ShellExecute，避免激活错误的子窗口）
     window = find_dingtalk_window(process_ids)
 
     # 首次未找到：可能最小化/隐藏导致面积太小，恢复后重试
     if window is None:
-        logger.info("首次搜索未找到钉钉窗口，尝试从最小化/隐藏状态恢复...")
-        restored = _restore_any_dingtalk_window(process_ids)
-        if restored:
-            time.sleep(1.0)
+        logger.info("首次搜索未找到钉钉窗口，尝试恢复...")
+        if _restore_any_dingtalk_window(process_ids):
+            time.sleep(0.5)
             window = find_dingtalk_window(process_ids)
 
     if window is None:
@@ -628,20 +643,15 @@ def activate_dingtalk(exe_path: str, launch_wait: int = 10) -> object:
             f"class={cls_name} rect=({left},{top},{width},{height}) visible={visible}"
         )
 
-        # 确保窗口可见且渲染完成
-        for _ in range(4):
-            time.sleep(0.5)
-            if hwnd and user32:
-                if user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd):
-                    break
-
-        # 强制拉到前台（注入用户输入信号绕过 Windows 前台锁）
+        # 强制拉到前台
         if hwnd and user32:
             fg = _force_foreground_window(hwnd)
-            time.sleep(0.5)
+            time.sleep(0.2)
             if fg:
                 logger.info(f"钉钉窗口已激活到前台: {window.title}")
             else:
+                # 激活失败时记录前台窗口，辅助诊断白色窗体问题
+                _log_foreground_window("激活失败")
                 logger.warning(f"钉钉窗口未能拉到前台: {window.title}")
 
         return window
