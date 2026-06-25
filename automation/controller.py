@@ -257,12 +257,12 @@ def prepare_work_notification_view(
     """进入置顶的工作通知会话，并将消息定位到底部。"""
     logger.info("准备工作通知会话：定位置顶会话，切换会话后回到底部")
 
-    # 聚焦会话列表区域一次，后续滚动不再重复聚焦
-    focus_window_for_scroll(
+    # 点击会话列表中的一条消息，使其获得焦点
+    click_window_ratio(
         window,
         x_ratio=conversation_list_x_ratio,
         y_ratio=conversation_list_y_ratio,
-        click=False,
+        delay=delay,
     )
 
     scroll_step_delay = 0.15
