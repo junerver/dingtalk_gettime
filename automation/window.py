@@ -13,6 +13,8 @@ CREATE_NO_WINDOW = 0x08000000
 DINGTALK_PROCESS_NAMES = {"dingtalk.exe"}
 DINGTALK_TITLE_KEYWORDS = ("钉钉", "DingTalk")
 MIN_MAIN_WINDOW_AREA = 600 * 400
+# DingTalk Electron 内容窗体的类名，不是主窗口
+EXCLUDED_CLASS_NAMES = {"Chrome_WidgetWin_0"}
 
 SW_HIDE = 0
 SW_SHOWNORMAL = 1
@@ -192,6 +194,25 @@ class Win32Window:
         return self.isActive
 
 
+def _get_hwnd_title(hwnd: int) -> str:
+    if user32 is None:
+        return ""
+    length = user32.GetWindowTextLengthW(hwnd)
+    if length <= 0:
+        return ""
+    buf = ctypes.create_unicode_buffer(length + 1)
+    user32.GetWindowTextW(hwnd, buf, length + 1)
+    return buf.value
+
+
+def _get_class_name(hwnd: int) -> str:
+    if user32 is None:
+        return ""
+    buf = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(hwnd, buf, 256)
+    return buf.value
+
+
 def _is_top_level_main_window(hwnd: int) -> bool:
     """检查窗口是否为真正的顶层主窗口（排除有 Owner 的子窗口和工具窗口）。"""
     if user32 is None:
@@ -201,6 +222,9 @@ def _is_top_level_main_window(hwnd: int) -> bool:
         return False
     ex_style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
     if ex_style & WS_EX_TOOLWINDOW:
+        return False
+    cls = _get_class_name(hwnd)
+    if cls in EXCLUDED_CLASS_NAMES:
         return False
     return True
 
@@ -349,6 +373,37 @@ def _get_hwnd(window) -> int | None:
     return _call_method(window, "getHandle")
 
 
+def _restore_any_dingtalk_window(process_ids: set[int]) -> bool:
+    """找到任意一个钉钉主窗口并恢复其可见状态，返回是否执行了恢复。"""
+    if user32 is None:
+        return False
+
+    # 用 pywinctl 搜索（无面积过滤），找到标题匹配的主窗口
+    for title in DINGTALK_TITLE_KEYWORDS:
+        try:
+            import pywinctl
+            for w in pywinctl.getWindowsWithTitle(title):
+                hwnd = _get_hwnd(w)
+                if not hwnd or not _is_top_level_main_window(hwnd):
+                    continue
+                cls = _get_class_name(hwnd)
+                if cls in EXCLUDED_CLASS_NAMES:
+                    continue
+                # 找到了，恢复它
+                if user32.IsIconic(hwnd):
+                    logger.info(f"恢复最小化窗口 hwnd={hwnd:#x} title={w.title!r}")
+                    user32.ShowWindow(hwnd, SW_RESTORE)
+                elif not user32.IsWindowVisible(hwnd):
+                    logger.info(f"显示隐藏窗口 hwnd={hwnd:#x} title={w.title!r}")
+                    user32.ShowWindow(hwnd, SW_SHOW)
+                else:
+                    continue
+                return True
+        except Exception as e:
+            logger.debug(f"pywinctl 搜索失败: {e}")
+    return False
+
+
 def find_dingtalk_window(process_ids: set[int] | None = None):
     """查找钉钉窗口句柄。返回窗口对象或None。"""
     if process_ids is None:
@@ -365,7 +420,7 @@ def find_dingtalk_window(process_ids: set[int] | None = None):
     window = _select_best_window(windows)
     if window is not None:
         left, top, width, height = _window_geometry(window)
-        logger.debug(
+        logger.info(
             f"找到钉钉窗口: title={window.title!r}, rect=({left}, {top}, {width}, {height}), "
             f"visible={_read_attr(window, 'visible', None)}, active={_read_attr(window, 'isActive', None)}"
         )
@@ -466,25 +521,54 @@ def activate_dingtalk(exe_path: str, launch_wait: int = 10) -> object:
 
     window = find_dingtalk_window(process_ids)
 
-    # 窗口未找到但进程已运行，可能是窗口被过滤，重试一次
-    if window is None and dingtalk_running:
-        time.sleep(0.5)
-        window = find_dingtalk_window(process_ids)
+    # 窗口未找到：可能最小化/隐藏导致面积太小被过滤，尝试恢复后重试
+    if window is None:
+        logger.info("首次搜索未找到钉钉窗口，尝试从最小化/隐藏状态恢复...")
+        restored = _restore_any_dingtalk_window(process_ids)
+        if restored:
+            time.sleep(1.0)
+            window = find_dingtalk_window(process_ids)
 
     if window is None:
         logger.error("无法找到钉钉窗口")
         return None
 
     try:
+        hwnd = _read_attr(window, "hwnd")
+        if not hwnd:
+            hwnd = _call_method(window, "getHandle")
+
+        cls_name = _get_class_name(hwnd) if hwnd else "N/A"
+        left, top, width, height = _window_geometry(window)
+        visible = user32.IsWindowVisible(hwnd) if hwnd and user32 else None
+        hwnd_str = f"{hwnd:#x}" if hwnd else "0"
+        logger.info(
+            f"选中窗口: hwnd={hwnd_str} title={window.title!r} "
+            f"class={cls_name} rect=({left},{top},{width},{height}) visible={visible}"
+        )
+
+        # 先确保窗口可见（从系统托盘恢复时窗口可能是 hidden）
+        if hwnd and user32 and not user32.IsWindowVisible(hwnd):
+            logger.debug("窗口不可见，执行 ShowWindow(SW_SHOW)")
+            user32.ShowWindow(hwnd, SW_SHOW)
+            time.sleep(0.5)
+
         if _read_attr(window, "isMinimized", False):
             _call_method(window, "restore", wait=True)
 
         if _read_attr(window, "visible", True) is False:
             _call_method(window, "show")
+            time.sleep(0.3)
 
         _call_method(window, "raiseWindow")
         activated = _call_method(window, "activate", wait=True)
-        time.sleep(0.2)
+
+        # 等待窗口真正渲染完成，最多等 2 秒
+        for _ in range(4):
+            time.sleep(0.5)
+            if hwnd and user32:
+                if user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd):
+                    break
 
         if activated is False or _read_attr(window, "isActive", True) is False:
             logger.warning(f"已尝试置前钉钉窗口，但系统未报告为前台: {window.title}")
