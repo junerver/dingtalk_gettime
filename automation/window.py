@@ -489,6 +489,21 @@ def minimize_window(window) -> bool:
     return True
 
 
+def close_window(window) -> bool:
+    """关闭窗口（钉钉会退到系统托盘，不退出进程）。"""
+    hwnd = _read_attr(window, 'hwnd')
+    if not hwnd:
+        hwnd = _call_method(window, 'getHandle')
+    if not hwnd:
+        return False
+    if user32 is None:
+        return False
+    WM_CLOSE = 0x0010
+    user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+    time.sleep(0.5)
+    return True
+
+
 def launch_dingtalk(exe_path: str, wait_seconds: int = 10) -> bool:
     """启动钉钉客户端。"""
     if not exe_path or not Path(exe_path).exists():

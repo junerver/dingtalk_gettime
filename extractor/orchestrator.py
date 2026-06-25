@@ -6,7 +6,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from automation.window import activate_dingtalk, is_dingtalk_running, minimize_window
+from automation.window import activate_dingtalk, is_dingtalk_running, close_window
 import pyautogui
 from automation.controller import (
     prepare_work_notification_view,
@@ -175,10 +175,10 @@ class ExtractOrchestrator:
                 logger.info('Reached top or cannot scroll further, stopping capture')
                 break
 
-        # Capture done, minimize DingTalk window immediately
-        minimize_window(window)
+        # Capture done, close DingTalk window (退到系统托盘)
+        close_window(window)
         logger.info(
-            f'Capture phase done, {len(captured_pages)} pages captured, DingTalk minimized'
+            f'Capture phase done, {len(captured_pages)} pages captured, DingTalk closed to tray'
         )
 
         if not captured_pages:
