@@ -507,21 +507,36 @@ def launch_dingtalk(exe_path: str, wait_seconds: int = 10) -> bool:
         return False
 
 
+def _shell_activate_dingtalk(exe_path: str) -> bool:
+    """通过 ShellExecute 激活已有钉钉实例（和用户双击 exe 效果一致）。"""
+    try:
+        import win32api
+        win32api.ShellExecute(0, "open", exe_path, None, "", 1)  # SW_SHOWNORMAL=1
+        return True
+    except Exception as e:
+        logger.debug(f"ShellExecute 激活失败: {e}")
+        return False
+
+
 def activate_dingtalk(exe_path: str, launch_wait: int = 10) -> object:
     """确保钉钉运行并激活窗口，返回窗口对象。"""
-    # 先检查进程是否已运行，只查一次 tasklist
+    # 先检查进程是否已运行
     process_ids = _get_dingtalk_process_ids()
     dingtalk_running = bool(process_ids)
 
-    if not dingtalk_running:
-        # 钉钉未运行，需要启动
+    if dingtalk_running:
+        # 已运行：用 ShellExecute 激活现有实例（和用户双击 exe / 点击任务栏效果一致）
+        _shell_activate_dingtalk(exe_path)
+        time.sleep(1.5)
+    else:
+        # 未运行：启动并等待
         if not launch_dingtalk(exe_path, launch_wait):
             return None
         process_ids = _get_dingtalk_process_ids()
 
     window = find_dingtalk_window(process_ids)
 
-    # 窗口未找到：可能最小化/隐藏导致面积太小被过滤，尝试恢复后重试
+    # 首次未找到：可能最小化/隐藏导致面积太小，恢复后重试
     if window is None:
         logger.info("首次搜索未找到钉钉窗口，尝试从最小化/隐藏状态恢复...")
         restored = _restore_any_dingtalk_window(process_ids)
@@ -547,31 +562,15 @@ def activate_dingtalk(exe_path: str, launch_wait: int = 10) -> object:
             f"class={cls_name} rect=({left},{top},{width},{height}) visible={visible}"
         )
 
-        # 先确保窗口可见（从系统托盘恢复时窗口可能是 hidden）
-        if hwnd and user32 and not user32.IsWindowVisible(hwnd):
-            logger.debug("窗口不可见，执行 ShowWindow(SW_SHOW)")
-            user32.ShowWindow(hwnd, SW_SHOW)
-            time.sleep(0.5)
-
-        if _read_attr(window, "isMinimized", False):
-            _call_method(window, "restore", wait=True)
-
-        if _read_attr(window, "visible", True) is False:
-            _call_method(window, "show")
-            time.sleep(0.3)
-
-        _call_method(window, "raiseWindow")
-        activated = _call_method(window, "activate", wait=True)
-
-        # 等待窗口真正渲染完成，最多等 2 秒
+        # 确保窗口已渲染完成
         for _ in range(4):
             time.sleep(0.5)
             if hwnd and user32:
                 if user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd):
                     break
 
-        if activated is False or _read_attr(window, "isActive", True) is False:
-            logger.warning(f"已尝试置前钉钉窗口，但系统未报告为前台: {window.title}")
+        if _read_attr(window, "isActive", True) is False:
+            logger.warning(f"钉钉窗口未报告为前台: {window.title}")
         else:
             logger.info(f"钉钉窗口已激活: {window.title}")
         return window
