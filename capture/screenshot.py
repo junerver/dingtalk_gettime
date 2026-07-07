@@ -3,6 +3,7 @@ import base64
 import ctypes
 import io
 import logging
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -245,11 +246,40 @@ class ScreenshotManager:
 
     def save(self, image: Image.Image, prefix: str = "dingtalk") -> str:
         """保存截图到文件，返回文件路径。"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         filename = f"{prefix}_{timestamp}.png"
         filepath = self.save_dir / filename
         image.save(str(filepath))
         logger.debug(f"截图已保存: {filepath}")
+        return str(filepath)
+
+    def stitch_vertical(self, image_paths: list[str], prefix: str = "dingtalk_stitched") -> str:
+        """使用 ImageMagick 将多张图片按传入顺序上下拼接。"""
+        if not image_paths:
+            raise ValueError("拼接图片列表不能为空")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        filepath = self.save_dir / f"{prefix}_{timestamp}.png"
+        command = [
+            "magick",
+            "convert",
+            "-append",
+            *[str(Path(path)) for path in image_paths],
+            str(filepath),
+        ]
+
+        try:
+            subprocess.run(command, check=True, capture_output=True, text=True)
+        except FileNotFoundError as e:
+            raise RuntimeError("未找到 magick 命令，无法拼接截图") from e
+        except subprocess.CalledProcessError as e:
+            detail = (e.stderr or e.stdout or "").strip()
+            raise RuntimeError(f"magick 拼接截图失败: {detail}") from e
+
+        if not filepath.exists():
+            raise RuntimeError("magick 执行完成但未生成拼接图片")
+
+        logger.debug(f"拼接截图已保存: {filepath}")
         return str(filepath)
 
     @staticmethod
@@ -282,6 +312,11 @@ class ScreenshotManager:
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
         return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+    @staticmethod
+    def file_to_base64(image_path: str) -> str:
+        """将图片文件转为base64字符串。"""
+        return base64.b64encode(Path(image_path).read_bytes()).decode("utf-8")
 
     def is_mostly_blank(self, image: Image.Image, threshold: float = 0.95) -> bool:
         """检测截图是否大部分为空白。"""

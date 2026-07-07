@@ -46,6 +46,10 @@ EMPTY_RECHECK_SUFFIX = """
 
 上一次没有提取到记录。请重新检查图片中每一条工作通知卡片，只要存在有效的上班打卡、下班打卡、打卡成功、迟到、早退、缺卡等考勤信息，就必须提取为records；"打卡·无效"不属于有效记录。"""
 
+STITCHED_IMAGE_INSTRUCTIONS = """
+
+这张图片由多页钉钉工作通知截图按上下方向拼接而成。请按从上到下的顺序阅读整张图片，拼接边界不代表记录中断；后截取到的更早记录页面在上方，先截取到的较晚记录页面在下方。"""
+
 RECORD_FIELDS = (
     "punch_type",
     "punch_time",
@@ -79,7 +83,7 @@ class VisionExtractor:
         self.parse_retry_count = parse_retry_count
         self.empty_result_retry_count = empty_result_retry_count
 
-    async def extract_from_image(self, base64_image: str) -> dict:
+    async def extract_from_image(self, base64_image: str, image_instructions: str = "") -> dict:
         """从base64图片提取考勤数据。返回解析后的dict。"""
         parse_failures = 0
         request_failures = 0
@@ -88,7 +92,7 @@ class VisionExtractor:
         last_partial_result = None
 
         while True:
-            prompt = self._build_prompt(prompt_suffix)
+            prompt = self._build_prompt(prompt_suffix, image_instructions=image_instructions)
             try:
                 content = await self._request_completion(base64_image, prompt)
             except Exception as e:
@@ -141,11 +145,11 @@ class VisionExtractor:
             )
             prompt_suffix = EMPTY_RECHECK_SUFFIX
 
-    def _build_prompt(self, suffix: str = "") -> str:
+    def _build_prompt(self, suffix: str = "", image_instructions: str = "") -> str:
         current_date = datetime.now().strftime("%Y-%m-%d")
         return (
             f"当前日期是 {current_date}。如果截图只显示月日，请按当前年份推断record_date。\n\n"
-            f"{EXTRACT_PROMPT}{suffix}"
+            f"{EXTRACT_PROMPT}{image_instructions}{suffix}"
         )
 
     async def _request_completion(self, base64_image: str, prompt: str) -> str:

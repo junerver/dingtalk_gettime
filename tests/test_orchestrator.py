@@ -16,8 +16,10 @@ from extractor.orchestrator import ExtractOrchestrator
 class FakeVision:
     def __init__(self, results):
         self.results = list(results)
+        self.calls = []
 
-    async def extract_from_image(self, base64_img):
+    async def extract_from_image(self, base64_img, image_instructions=""):
+        self.calls.append((base64_img, image_instructions))
         return self.results.pop(0)
 
 
@@ -34,6 +36,19 @@ class FakeScreenshotManager:
 
     def to_base64(self, screenshot):
         return f"base64-{screenshot}"
+
+
+class FakeStitchingScreenshotManager(FakeScreenshotManager):
+    def __init__(self):
+        super().__init__()
+        self.stitched_inputs = []
+
+    def stitch_vertical(self, image_paths):
+        self.stitched_inputs.append(list(image_paths))
+        return "stitched.png"
+
+    def file_to_base64(self, image_path):
+        return f"base64-{image_path}"
 
 
 class FakeDbSession:
@@ -212,7 +227,7 @@ async def test_run_extraction_stops_after_duplicate_page_threshold(monkeypatch, 
             },
         ],
     )
-    orch.config.automation.max_pages = 5
+    orch.config.automation.max_pages = 2
     orch.config.automation.duplicate_page_stop_threshold = 2
     captures = iter(["page-1", "page-2"])
     scroll_calls = []
@@ -231,3 +246,82 @@ async def test_run_extraction_stops_after_duplicate_page_threshold(monkeypatch, 
     assert result["pages_scanned"] == 2
     assert upsert_actions == ["2026-06-20", "2026-06-19"]
     assert scroll_calls == ["page-1"]
+
+
+@pytest.mark.asyncio
+async def test_run_extraction_stitches_pages_in_reverse_capture_order(monkeypatch, tmp_path):
+    monkeypatch.setattr(orchestrator_module, "activate_dingtalk", lambda path, wait: object())
+    orch = _make_orchestrator(
+        tmp_path,
+        [
+            {"records": [], "has_more": False, "page_reached_top": True},
+        ],
+    )
+    orch.screenshot_mgr = FakeStitchingScreenshotManager()
+    orch.config.automation.max_pages = 5
+    orch.config.vision.image_stitch_max_pages = 3
+    captures = iter(["page-1", "page-2", "page-3"])
+    scroll_calls = []
+
+    orch._capture_content = lambda window: next(captures)
+
+    def fake_scroll_page(window, screenshot):
+        scroll_calls.append(screenshot)
+        return True
+
+    orch._scroll_page = fake_scroll_page
+
+    result = await orch.run_extraction(max_pages=3)
+
+    assert result["status"] == "ok"
+    assert result["pages_scanned"] == 3
+    assert scroll_calls == ["page-1", "page-2"]
+    assert orch.screenshot_mgr.stitched_inputs == [
+        ["screenshot-3.png", "screenshot-2.png", "screenshot-1.png"]
+    ]
+    assert orch.vision.calls == [
+        (
+            "base64-stitched.png",
+            orchestrator_module.STITCHED_IMAGE_INSTRUCTIONS,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_extraction_keeps_parallel_page_analysis_over_stitch_threshold(monkeypatch, tmp_path):
+    monkeypatch.setattr(orchestrator_module, "activate_dingtalk", lambda path, wait: object())
+    orch = _make_orchestrator(
+        tmp_path,
+        [
+            {"records": [], "has_more": True, "page_reached_top": False},
+            {"records": [], "has_more": True, "page_reached_top": False},
+            {"records": [], "has_more": True, "page_reached_top": False},
+            {"records": [], "has_more": True, "page_reached_top": False},
+        ],
+    )
+    orch.screenshot_mgr = FakeStitchingScreenshotManager()
+    orch.config.automation.max_pages = 5
+    orch.config.vision.image_stitch_max_pages = 3
+    captures = iter(["page-1", "page-2", "page-3", "page-4"])
+    scroll_calls = []
+
+    orch._capture_content = lambda window: next(captures)
+
+    def fake_scroll_page(window, screenshot):
+        scroll_calls.append(screenshot)
+        return True
+
+    orch._scroll_page = fake_scroll_page
+
+    result = await orch.run_extraction(max_pages=4)
+
+    assert result["status"] == "ok"
+    assert result["pages_scanned"] == 4
+    assert scroll_calls == ["page-1", "page-2", "page-3"]
+    assert orch.screenshot_mgr.stitched_inputs == []
+    assert orch.vision.calls == [
+        ("base64-page-1", ""),
+        ("base64-page-2", ""),
+        ("base64-page-3", ""),
+        ("base64-page-4", ""),
+    ]

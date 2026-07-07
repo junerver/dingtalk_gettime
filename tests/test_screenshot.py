@@ -34,6 +34,42 @@ def test_image_to_base64():
     assert len(b64) > 0
 
 
+def test_stitch_vertical_uses_magick_append_in_given_order(monkeypatch, tmp_path):
+    mgr = ScreenshotManager(save_dir=str(tmp_path))
+    calls = []
+
+    def fake_run(command, check, capture_output, text):
+        calls.append({
+            "command": command,
+            "check": check,
+            "capture_output": capture_output,
+            "text": text,
+        })
+        Path(command[-1]).write_bytes(b"stitched")
+
+    monkeypatch.setattr("capture.screenshot.subprocess.run", fake_run)
+
+    output_path = mgr.stitch_vertical(["3.png", "2.png", "1.png"])
+
+    assert Path(output_path).exists()
+    assert calls == [
+        {
+            "command": [
+                "magick",
+                "convert",
+                "-append",
+                "3.png",
+                "2.png",
+                "1.png",
+                output_path,
+            ],
+            "check": True,
+            "capture_output": True,
+            "text": True,
+        }
+    ]
+
+
 def test_changed_pixel_ratio_detects_identical_and_changed_images():
     img1 = Image.new("RGB", (10, 10), color="black")
     img2 = Image.new("RGB", (10, 10), color="black")

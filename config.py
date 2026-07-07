@@ -43,6 +43,7 @@ class VisionConfig:
     max_tokens: int = 4000
     parse_retry_count: int = 2
     empty_result_retry_count: int = 1
+    image_stitch_max_pages: int = 3
 
 
 @dataclass

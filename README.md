@@ -9,6 +9,8 @@
 3. 解析识别结果，提取姓名、日期、打卡类型（上班/下班）、时间、状态等字段
 4. 存入 SQLite 数据库，提供 REST API 查询接口
 
+截图提取会先批量采集页面，再关闭/最小化钉钉窗口后进行 AI 分析。默认当本次请求页数不超过 `vision.image_stitch_max_pages` 时，会把多页截图倒序纵向拼接为一张图，只请求一次 Vision 模型；页数超过阈值时继续使用逐页图片并发请求。
+
 ## 项目结构
 
 ```
@@ -40,6 +42,12 @@
 pip install -r requirements.txt
 ```
 
+如果启用截图拼接，需要本机可执行 `magick` 命令。Windows 可安装 ImageMagick，并确认命令行中能执行：
+
+```bash
+magick -version
+```
+
 ### 2. 配置
 
 ```bash
@@ -51,6 +59,7 @@ cp config.yaml.sample config.yaml
 - `dingtalk.path` — 钉钉客户端安装路径
 - `vision.api_base` — Vision 模型 API 地址（兼容 OpenAI API 格式）
 - `vision.api_key` — API 密钥
+- `vision.image_stitch_max_pages` — 截图页数小于等于该值时，倒序拼接为一张图后请求 Vision 模型，默认 `3`
 
 ### 3. 启动
 
@@ -63,7 +72,16 @@ python main.py
 ### 4. PM2 部署（可选）
 
 ```bash
-pm2 start ecosystem.config.js
+pm2 startOrRestart .\ecosystem.config.js
+pm2 save
+```
+
+如果 PM2 启动后反复重启，并在日志中看到 `address already in use` 或 Windows `10048` 端口占用错误，通常是已有非 PM2 的 `python main.py` 仍在占用 `8345`。先确认端口归属，再停掉旧进程后重新启动 PM2：
+
+```powershell
+Get-NetTCPConnection -LocalPort 8345
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'dingtalk_gettime|main.py' }
+pm2 startOrRestart .\ecosystem.config.js
 ```
 
 ## API 接口
@@ -101,6 +119,24 @@ scheduler:
 ```
 
 服务启动后会自动在指定时间执行提取任务。
+
+## 关键配置
+
+```yaml
+automation:
+  max_pages: 20
+
+vision:
+  max_tokens: 4000
+  parse_retry_count: 2
+  empty_result_retry_count: 1
+  image_stitch_max_pages: 3
+```
+
+- `automation.max_pages`: 单次请求全局最大处理页数。
+- `vision.image_stitch_max_pages`: 当本次请求计算后的页数小于等于该值，并且实际捕获超过 1 张截图时，启用截图拼接。默认 `3`；设为 `0` 可关闭拼接。
+- 拼接顺序是倒序：后截取到的更早记录页面在上方，先截取到的较晚记录页面在下方，避免钉钉打卡记录时间线颠倒。
+- 拼接失败或 `magick` 不可用时，服务会回退到逐页并发 Vision 请求。
 
 ## 运行环境
 

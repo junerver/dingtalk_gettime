@@ -17,7 +17,7 @@ from automation.controller import (
 )
 from capture.screenshot import ScreenshotManager
 from database.crud import upsert_record
-from extractor.vision import VisionExtractor
+from extractor.vision import STITCHED_IMAGE_INSTRUCTIONS, VisionExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +123,65 @@ class ExtractOrchestrator:
             return configured_limit
         return min(configured_limit, max(0, requested_max_pages))
 
+    def _should_stitch_images(self, page_limit: int, captured_pages: list[dict]) -> bool:
+        stitch_max_pages = max(0, getattr(self.config.vision, "image_stitch_max_pages", 0))
+        return stitch_max_pages > 0 and 1 < len(captured_pages) and page_limit <= stitch_max_pages
+
+    async def _analyze_captured_pages(self, captured_pages: list[dict], page_limit: int) -> list[dict]:
+        if self._should_stitch_images(page_limit, captured_pages):
+            try:
+                # 钉钉向上滚动后截到的是更早页面，拼接时倒序让更早记录在上方。
+                image_paths = [
+                    page_data["screenshot_path"]
+                    for page_data in reversed(captured_pages)
+                ]
+                stitched_path = self.screenshot_mgr.stitch_vertical(image_paths)
+                base64_img = self.screenshot_mgr.file_to_base64(stitched_path)
+                result = await self.vision.extract_from_image(
+                    base64_img,
+                    image_instructions=STITCHED_IMAGE_INSTRUCTIONS,
+                )
+                logger.info(
+                    f"已将 {len(captured_pages)} 页截图倒序拼接为单张图片进行AI分析: {stitched_path}"
+                )
+                return [
+                    {
+                        "result": result,
+                        "page_data": {
+                            "page_num": f"stitched-{len(captured_pages)}",
+                            "screenshot_path": stitched_path,
+                        },
+                        "scanned_pages": len(captured_pages),
+                    }
+                ]
+            except Exception as e:
+                logger.warning(f"拼接截图分析失败，回退到逐页并发分析: {e}")
+
+        async def _analyze_page(page_data: dict):
+            result = await self.vision.extract_from_image(page_data['base64_img'])
+            return result, page_data
+
+        analysis_tasks = [_analyze_page(p) for p in captured_pages]
+        analysis_results = await asyncio.gather(*analysis_tasks, return_exceptions=True)
+
+        analysis_units = []
+        for idx, analysis_result in enumerate(analysis_results):
+            page_data = captured_pages[idx]
+            page_num = page_data['page_num']
+
+            if isinstance(analysis_result, Exception):
+                logger.error(f'Page {page_num} AI analysis failed: {analysis_result}')
+                continue
+
+            result, analyzed_page_data = analysis_result
+            analysis_units.append({
+                "result": result,
+                "page_data": analyzed_page_data,
+                "scanned_pages": 1,
+            })
+
+        return analysis_units
+
     async def run_extraction(self, max_pages: int | None = None, dry_run: bool = False) -> dict:
         """Execute the full attendance extraction flow.
 
@@ -198,29 +257,19 @@ class ExtractOrchestrator:
                 'records': [],
             }
 
-        # ---- Phase 2: Parallel AI analysis ----
-        async def _analyze_page(page_data: dict):
-            result = await self.vision.extract_from_image(page_data['base64_img'])
-            return result, page_data
-
-        analysis_tasks = [_analyze_page(p) for p in captured_pages]
-        analysis_results = await asyncio.gather(*analysis_tasks, return_exceptions=True)
+        # ---- Phase 2: AI analysis ----
+        analysis_units = await self._analyze_captured_pages(captured_pages, page_limit)
 
         # ---- Phase 3: Aggregate and store records ----
         all_records = []
         pages_scanned = 0
 
-        for idx, analysis_result in enumerate(analysis_results):
-            page_data = captured_pages[idx]
+        for analysis_unit in analysis_units:
+            result = analysis_unit["result"]
+            page_data = analysis_unit["page_data"]
             page_num = page_data['page_num']
-
-            if isinstance(analysis_result, Exception):
-                logger.error(f'Page {page_num} AI analysis failed: {analysis_result}')
-                continue
-
-            result, _ = analysis_result
             records = result.get('records', [])
-            pages_scanned += 1
+            pages_scanned += analysis_unit["scanned_pages"]
             logger.info(f'Page {page_num}: extracted {len(records)} records')
 
             inserted_count = 0

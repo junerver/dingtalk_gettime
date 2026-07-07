@@ -30,6 +30,7 @@ vision:
   max_tokens: 4000
   parse_retry_count: 2
   empty_result_retry_count: 1
+  image_stitch_max_pages: 3
 
 database:
   path: "./data/attendance.db"

@@ -39,6 +39,10 @@ pm2 logs dingtalk-gettime
 pm2 restart dingtalk-gettime
 pm2 stop dingtalk-gettime
 
+# 排查 8345 端口占用
+Get-NetTCPConnection -LocalPort 8345
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'dingtalk_gettime|main.py' }
+
 # 运行全部测试
 python -m pytest -q
 
@@ -57,6 +61,8 @@ logs/pm2-error.log
 ```
 
 `logs/*.log` 已在 `.gitignore` 中忽略。
+
+如果 PM2 启动后反复重启，并且 `logs/pm2-error.log` 中出现 `Errno 10048` 或 `address already in use`，先检查是否有旧的非 PM2 `python main.py` 进程占用 `8345`。确认是本项目旧进程后，停掉旧进程再执行 `pm2 startOrRestart .\ecosystem.config.js`。
 
 如果需要开机后自动恢复 PM2 进程，建议用 Windows 任务计划程序在“用户登录时”执行：
 
@@ -211,6 +217,7 @@ vision:
   max_tokens: 4000
   parse_retry_count: 2
   empty_result_retry_count: 1
+  image_stitch_max_pages: 3
 ```
 
 配置含义：
@@ -221,6 +228,9 @@ vision:
 - `screenshots.content_crop_*`: 从完整钉钉窗口截图裁剪出右侧工作通知内容区域，减少多模态 token 消耗。
 - `vision.parse_retry_count`: LLM 返回坏 JSON 时的重试次数。
 - `vision.empty_result_retry_count`: LLM 返回空记录时的复核次数。
+- `vision.image_stitch_max_pages`: 本次请求页数小于等于该值时，将多页截图倒序纵向拼接后只请求一次 Vision 模型，默认 `3`。设为 `0` 可关闭拼接。
+
+截图拼接依赖本机 `magick` 命令（ImageMagick）。拼接命令形态为 `magick convert -append 3.png 2.png 1.png out.png`。由于钉钉提取是从最新消息向上滚动，后截取到的是更早记录，所以拼接时必须倒序：最后截图在上，第一张截图在下。拼接失败时编排器会回退到逐页并发 Vision 请求。
 
 注意：`config.yaml` 当前包含真实多模态 API Key。修改或提交相关内容时要主动检查是否需要脱敏。
 
@@ -245,9 +255,9 @@ HTTP请求 / 定时任务
 - `config.py`：dataclass 配置体系，`load_config()` 读取 `config.yaml` 并填充默认值。
 - `automation/window.py`：查找、启动、激活钉钉窗口，包含 Win32 窗口查找逻辑。
 - `automation/controller.py`：封装点击、滚动、会话切换、工作通知回底等模拟操作。
-- `capture/screenshot.py`：窗口截图、内容区域裁剪、空白检测、截图相似度检测。优先使用窗口句柄截图，避免截到终端或其它窗口。
+- `capture/screenshot.py`：窗口截图、内容区域裁剪、空白检测、截图相似度检测、ImageMagick 纵向拼接。优先使用窗口句柄截图，避免截到终端或其它窗口。
 - `extractor/vision.py`：多模态识图、JSON 解析、坏 JSON 重试、空结果复核、截断 JSON 片段恢复、记录归一化。
-- `extractor/orchestrator.py`：完整提取流程编排。LLM 的 `has_more/page_reached_top` 只是软信号，是否继续主要以滚动后截图变化和重复页阈值判断。
+- `extractor/orchestrator.py`：完整提取流程编排。先批量截图并关闭钉钉窗口，再根据 `vision.image_stitch_max_pages` 选择倒序拼接单次识别或逐页并发识别。LLM 的 `has_more/page_reached_top` 只是软信号，是否继续主要以滚动后截图变化判断。
 - `database/models.py`：SQLAlchemy ORM 模型。
 - `database/crud.py`：入库、查询、每日汇总。入库时执行业务规则去重和最终记录选择。
 - `ecosystem.config.js`：PM2 启动配置。
@@ -259,15 +269,15 @@ HTTP请求 / 定时任务
 1. 激活钉钉主窗口。
 2. 准备工作通知会话：滚动左侧会话列表，点击第二条会话，再点击置顶的工作通知，实现进入工作通知并回到底部。
 3. 截取钉钉窗口，并裁剪右侧工作通知内容区域。
-4. 调用多模态接口识别考勤记录。
-5. 入库并按业务规则更新、跳过或忽略记录。
-6. 如果没有达到页数上限、重复页阈值或截图不变停止条件，则向上滚动一页继续。
+4. 如果没有达到页数上限或截图不变停止条件，则向上滚动一页继续截图。
+5. 截图阶段完成后关闭钉钉窗口到托盘。
+6. 当本次页数小于等于 `vision.image_stitch_max_pages` 且截图超过 1 张时，按截图顺序倒序拼接后请求一次多模态接口；页数超过阈值时逐页并发请求多模态接口。
+7. 入库并按业务规则更新、跳过或忽略记录。
 
 停止条件：
 
 - 达到本次请求 `max_pages` 或全局 `automation.max_pages`。
 - 截图为空白。
-- 连续重复页数达到 `duplicate_page_stop_threshold`。
 - 滚动后截图几乎不变，备用滚轮消息也无法改变截图。
 
 ## 业务规则
@@ -316,14 +326,16 @@ python -m pytest tests/test_crud.py -q
 - API 参数校验和 `max_pages` 传递。
 - 定时时间计算。
 - 编排层翻页、页数上限、重复页停止。
+- 编排层截图倒序拼接、拼接阈值、超过阈值后的逐页并发回退。
 - 识图层坏 JSON 重试、空结果复核、截断 JSON 恢复、无效记录过滤。
 - 数据库层无效记录忽略、上班最早、下班最晚。
-- 截图裁剪和窗口截图容错。
+- 截图裁剪、窗口截图容错、ImageMagick 拼接命令顺序。
 
 ## 开发注意事项
 
 - 这个项目会真实操作 Windows 桌面和钉钉窗口。运行提取接口前，应确保当前用户已登录 Windows，钉钉可正常显示。
 - 不要把服务部署为普通 Windows Service。需要后台运行时使用 PM2，开机恢复用任务计划程序在用户登录时执行 `pm2 resurrect`。
+- 修改截图拼接逻辑时，必须保持“后截取图片在上、先截取图片在下”的倒序拼接规则，否则钉钉打卡时间线会颠倒。
 - 如果修改钉钉 UI 坐标比例，优先调整 `config.yaml`，再补充控制器或截图测试。
 - 如果修改数据库入库语义，同步更新 `tests/test_crud.py` 和 `tests/test_orchestrator.py`。
 - 如果修改 LLM 提示或解析逻辑，同步更新 `tests/test_vision.py`。
