@@ -282,4 +282,9 @@ def daily_summary(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=config.server.host, port=config.server.port)
+    # 强制单进程（workers=1）。uvicorn 在 workers 为 None 时会读取环境变量的
+    # WEB_CONCURRENCY；若该变量被设为 >1（部分机器/PM2 环境默认会设置），
+    # uvicorn 会派生 worker 子进程，导致 PM2 只跟踪不绑端口的父进程，
+    # 重启时子进程成为孤儿占用 8345 端口，进而引发绑定失败->崩溃重启循环。
+    # 本项目由 PM2 负责进程管理，不应再让 uvicorn 自己多进程，故显式写死 1。
+    uvicorn.run(app, host=config.server.host, port=config.server.port, workers=1)

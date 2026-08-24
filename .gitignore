@@ -10,4 +10,5 @@ build/
 .pytest_cache/
 config.yaml
 .venv/
+.workbuddy/
 database\__pycache__

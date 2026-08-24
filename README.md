@@ -19,6 +19,7 @@
 ├── config.yaml              # 运行时配置（不提交，需自行创建）
 ├── config.yaml.sample       # 配置示例
 ├── ecosystem.config.js      # PM2 部署配置
+├── start.ps1                 # 干净启动脚本（释放端口 + 无窗口启动）
 ├── requirements.txt
 ├── automation/
 │   ├── controller.py        # 钉钉窗口操作控制器
@@ -38,9 +39,14 @@
 
 ### 1. 安装依赖
 
+建议在项目内创建虚拟环境，并在其中安装依赖（`ecosystem.config.js` 默认使用 `.venv/Scripts/pythonw.exe` 作为解释器）：
+
 ```bash
-pip install -r requirements.txt
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
+
+> 注意：`jinja2` 已被显式加入 `requirements.txt`（用于 `Jinja2Templates`），安装依赖时会一并安装。
 
 如果启用截图拼接，需要本机可执行 `magick` 命令。Windows 可安装 ImageMagick，并确认命令行中能执行：
 
@@ -69,14 +75,27 @@ python main.py
 
 服务默认运行在 `http://0.0.0.0:8345`。
 
-### 4. PM2 部署（可选）
+> 说明：`main.py` 已通过 `uvicorn.run(..., workers=1)` 强制单进程运行，避免 uvicorn 受环境中的 `WEB_CONCURRENCY` 影响而派生多进程、与 PM2 的进程管理冲突。
+
+### 4. PM2 部署（后台静默运行，推荐）
+
+本项目的 PM2 配置（`ecosystem.config.js`）使用 venv 内的 `pythonw.exe` 作为解释器，**以无控制台窗口的方式后台运行**，不会像 `python.exe` 那样在每次重启时弹出黑色终端窗口。
+
+推荐使用随项目提供的启动脚本，它会先释放被占用的 `8345` 端口、删掉旧的 PM2 实例，再以无窗口方式启动，从根上避免"绑定失败 → 崩溃重启 → 弹窗"的循环：
+
+```powershell
+.\start.ps1
+pm2 save
+```
+
+如需手动启动：
 
 ```bash
 pm2 startOrRestart .\ecosystem.config.js
 pm2 save
 ```
 
-如果 PM2 启动后反复重启，并在日志中看到 `address already in use` 或 Windows `10048` 端口占用错误，通常是已有非 PM2 的 `python main.py` 仍在占用 `8345`。先确认端口归属，再停掉旧进程后重新启动 PM2：
+如果 PM2 启动后反复重启，并在日志中看到 `address already in use` 或 Windows `10048` 端口占用错误，通常是已有旧进程仍在占用 `8345`。先确认端口归属，再停掉旧进程后重新启动：
 
 ```powershell
 Get-NetTCPConnection -LocalPort 8345

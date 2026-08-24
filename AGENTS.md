@@ -27,6 +27,9 @@ rtk 不能直接代理 PowerShell 内置 cmdlet，需要让它代理 `powershell
 pip install -r requirements.txt
 python main.py
 
+# 推荐用 start.ps1 启动：会先释放 8345 端口再启动，避免 PM2 崩溃重启循环
+.\start.ps1
+# 等价手动命令（需先确保 8345 端口空闲）：
 pm2 startOrRestart .\ecosystem.config.js
 pm2 save
 pm2 list
@@ -41,8 +44,12 @@ python -m pytest tests/test_screenshot.py -q
 ## PM2 运行注意事项
 
 - PM2 配置文件是 `ecosystem.config.js`。
+- 解释器使用 **venv 内的 `pythonw` 绝对路径**（见配置注释）。进程以**无窗口**方式后台运行，不会弹出终端黑框。
 - 服务日志在 `logs/pm2-out.log` 和 `logs/pm2-error.log`。
-- 如果启动后反复重启，先看日志：
+- **解释器绝对不能写成 `python` 或 `pythonw` 裸名**：PM2 守护进程按自身 cwd 解析，会命中全局 Python（未安装本项目依赖），导致 `ModuleNotFoundError` / `ImportError` → 进程秒退 → PM2 每 5 秒重启一次 → 每次重生产生一个闪烁的黑框终端窗口（即用户报的“不断弹出并自动关闭”）。
+- `requirements.txt` 已显式包含 `jinja2`（之前缺失，即使 venv 也会因 `Jinja2Templates` 导入失败而崩溃重启）。修改依赖后请同步更新该文件。
+- `main.py` 的 `uvicorn.run(..., workers=1)` 强制单进程。原因：若环境存在 `WEB_CONCURRENCY`（部分机器/PM2 默认会注入），uvicorn 会派生 worker 子进程，使 PM2 只跟踪不绑端口的父进程；本项目已由 PM2 负责进程管理，不应再让 uvicorn 自管多进程。
+- 若启动后反复重启，先看日志：
 
 ```powershell
 pm2 logs dingtalk-gettime --lines 100 --nostream
@@ -56,6 +63,7 @@ Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'dingtalk_g
 ```
 
 确认是本项目旧 `python main.py` 进程后，再停止旧进程并用 PM2 启动。不要误杀无关进程。
+- 最干净的启动方式始终用 `.\start.ps1`：它会先释放 8345 端口、删除旧 PM2 实例，再无窗口启动，从根本上避免绑定失败引发的崩溃重启循环。
 
 ## 截图拼接逻辑
 
